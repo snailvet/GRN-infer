@@ -155,5 +155,8 @@ cython_debug/
 # VScode workspace file
 *.code-workspace
 
-# jupyter notebook for testing little bits of code
-test.ipynb
+# jupyter notebooks 
+*.ipynb
+
+# outputs
+pretrain_output
