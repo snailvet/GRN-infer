@@ -117,9 +117,10 @@ def init_data(opt):
 def train_model(opt):
 
     input_all, d_mask_np, d_mask, gene_name, means, stds = init_data(opt)
+    tf_data = pd.read_csv(opt.tf_data_file)
     tf_names = retrieve_tf_names(
         gene_name, 
-        opt.tf_data_file, 
+        tf_data, 
         opt.dorothea_grade, 
         opt.number_report_score
     )

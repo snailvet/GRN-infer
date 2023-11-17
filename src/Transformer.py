@@ -233,17 +233,14 @@ class GeneMasker():
 ###############################################################################
 # data manipulation functions 
 
-def retrieve_tf_names(gene_names, tf_file, d_grade = None, nr_score = None):
+def retrieve_tf_names(gene_names, tf_data, d_grade = None, nr_score = None):
     """
     Inputs:
         gene_names: the gene names from the scRNA-seq data
-        tf_data:    the known transcription factor data
+        tf_data:    the known transcription factor data ( must have columns GeneName, Dorothea, & Number_Report)
         d_grade:    the minimum allowable Dorothea letter grade (eg. "B" will select transcription factors with Dorothea grades of "A" and "B")
         nr_score:   the minimum allowable Number Report score (eg. "3" will allow any transcription factor with a number report of at least 3)
     """
-
-    # load tf_data
-    tf_data = pd.read_csv(tf_file)
 
     # find transcription factors that we have in our gene_names
     tf_data = tf_data[tf_data["GeneName"].isin(gene_names)] 
