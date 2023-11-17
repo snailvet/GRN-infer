@@ -8,7 +8,7 @@ import pickle as pkl
 import random
 import torch
 
-from src.Transformer import ATTNLoss, TranscriptionFactorMasker, Transformer 
+from src.Transformer import retrieve_tf_names, GeneMasker, GRNInferModel
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 
@@ -16,22 +16,24 @@ from tqdm import tqdm
 # parse arguments
 
 parser = argparse.ArgumentParser()
+parser.add_argument("--alpha", type = float, default = 0.01, help = "scale hyperparameter for the loss regularisation term")
+parser.add_argument("--attention_dim", default = 64, type = int, metavar = "N", help = "dimensionality of the attention layer")
 parser.add_argument("--attention_heads", default = 4, type = int, metavar = "N", help = "number of attention heads")
 parser.add_argument("--batchsize", type = int, default = 32)
 parser.add_argument("--dataset", type = str, default = '')
 parser.add_argument('--data_file', type = str, help = 'path of input scRNA-seq file.')
+parser.add_argument("--dropout", type = float, default = 0.0, help = "Dropout probability in the dropout layers of the model")
+parser.add_argument("--dorothea_grade", type = str, default = "A", help = 'the minimum allowable Dorothea letter grade for transcription factors')
 parser.add_argument("--embed_dim", default = 64, type = int, metavar = "N", help = "embedding dimension")
-parser.add_argument("--ffn_embed_dim", default = 64, type = int, metavar = "N", help = "embedding dimension for FFN")
-parser.add_argument("--layers", default = 5, type = int, metavar = "N", help = "number of layers")
+parser.add_argument("--ffn_embed_dim", default = 64, type = int, metavar = "N", help = "embedding dimension for both feed forward networks of the model")
 parser.add_argument('--lr', type = float, default = 1e-4, help = 'learning rate.')
 parser.add_argument("--n_epochs", type = int, default = 1500, help = "number of epochs of training")
-parser.add_argument("--p", type = float, default = 0.15,help = 'the fraction of random mask')
+parser.add_argument("--number_report_score", type = int, default = 4, help = 'the minimum allowable Number Report score for transcription factors')
 parser.add_argument("--PIDC_file", type = str, default = '')
 parser.add_argument("--save_name", type = str, default = './pretrain_output/')
 parser.add_argument("--seed", type = int, default = 0)
-parser.add_argument("--top_k", type = int, default = 20, help = "The number of largest attention weights to retain") #? need a defalt value
-parser.add_argument("--alpha", type = float, default = 0.01, help = "Mean square error scale")
-parser.add_argument("--dropout", type = float, default = 0.0, help = "Dropout rate in the transformer")
+parser.add_argument('--tf_data_file', type = str, help = 'path of transcription factor csv file.')
+parser.add_argument("--top_k", type = int, default = 20, help = "The number of largest attention weights to retain when calculating loss") #? need a defalt value
 opt = parser.parse_args()
 
 ###############################################################################
@@ -45,10 +47,10 @@ if torch.cuda.is_available():
 
 # set device
 if torch.cuda.is_available():
-    device = torch.device("cpu")
-else:
     device = torch.device("cuda:0")
-print("Using device ", device)
+else:
+    device = torch.device("cpu")
+print("Using device: ", device)
 
 ###############################################################################
 
@@ -56,7 +58,6 @@ def init_data(opt):
 
     # load data
     data = pd.read_csv(opt.data_file, header = 0, index_col = 0).T
-    # data = pd.read_csv(opt["data_file"], header = 0, index_col = 0).T
     data_values = data.values
 
     # build masks for data (nonzero values are true)
@@ -116,37 +117,40 @@ def init_data(opt):
 def train_model(opt):
 
     input_all, d_mask_np, d_mask, gene_name, means, stds = init_data(opt)
+    tf_names = retrieve_tf_names(
+        gene_name, 
+        opt.tf_data_file, 
+        opt.dorothea_grade, 
+        opt.number_report_score
+    )
     print('Finished data preprocessing')
 
-
     #########################################
-    ### setup the Transformer ###
+    ### setup the Model ###
     #########################################
     
-    model = Transformer(
-        input_dim = None, 
-        attn_dim = None,
+    model = GRNInferModel(
+        input_dim = input_all.shape[1], 
+        attn_dim = opt.attention_dim,
         num_heads = opt.attention_heads, 
-        ffn_embed_dim = opt.ffn_embed_dim,
-        dropout = opt.dropout, 
+        pre_ffn_embed_dim = opt.ffn_embed_dim,
+        post_ffn_embed_dim = opt.ffn_embed_dim,
         alpha = opt.alpha,
-        top_k = opt.top_k
+        top_k = opt.top_k,
+        dropout = opt.dropout, 
     ).to(device)
     
     #########################################
     ### setup masking object              ###
     #########################################
 
-    #? Need to implement pulling tf_names from dataset
-    tf_names = None
-    tf_masker = TranscriptionFactorMasker(
+    g_masker = GeneMasker(
         genes = gene_name,
         t_factors = tf_names
     )
 
     #########################################
     
-    n_gene = len(gene_name)
     optimizer = torch.optim.AdamW(
         model.parameters(), 
         lr = opt.lr, 
@@ -188,46 +192,27 @@ def train_model(opt):
 
         for data, mask, idn in dataloader:
             data = torch.stack([data] * 1)
-            mask = torch.stack([mask] * 1)
+
             optimizer.zero_grad()
             data_output = data.clone()
             data = data.to(device)
 
-            
+            # mask non-transcription factor genes in input data
+            g_masker.mask_non_tfs(data)
+                                    
             ############################
-            # TODO 2: design the mask ##
-            ############################
-            while True:
+            # forward pass
 
-                mask_id = np.array(
-                    random.choices(
-                        range(data.shape[1] * data.shape[2]), 
-                        k = int(data.shape[1] * data.shape[2] *opt.p)
-                    )
-                )
-                data[0, mask_id // n_gene, mask_id % n_gene] = 0
-                mask_new = torch.zeros_like(mask)
-                mask_new[0, mask_id // n_gene, mask_id % n_gene] = 1
-                mask_new = (mask_new * mask)
-                
-                if (mask_new).sum().item()>0:
-                    break
-            
-            # applying mask to embedding
-            #? needs proper implementation here 
-            mask = tf_masker(data)
-            #? multiply mask by data??
-                        
-            ############################
-            mask_new = mask_new.to(device)
-            zeros = (data == 0).float() #? Why are we using zeros?
-            output, attn = model(data, zeros, return_attn = True)
-            mask_new = mask_new.to(device)
-
+            output, attn = model(data, return_attn = True)
 
             ############################
-            # TODO 3: design the loss ##
+            # calculate loss          ##
             ############################
+
+            # mask the transcription factors in the input to the model and it's output
+            g_masker.mask_tfs(output)
+            g_masker.mask_tfs(data_output)
+
             loss = model.loss(
                 output, 
                 data_output.to(device), 
@@ -250,22 +235,21 @@ def train_model(opt):
         loss_save.append(torch.stack(loss_all).mean().cpu().item())
     
     print('Begin generate candidates GRN features')
-    test_device = device #torch.device('cuda')
+    test_device = device 
 
     model = model.to(test_device)
     input = input_all.clone().to(test_device).unsqueeze(0)
-    zeros = (input == 0).float()
     
     with torch.no_grad():
-        output, attn = model(input, zeros, return_attn = True)
+        output, attn = model(input, return_attn = True)
     
     adj = []
     for i in range(attn.shape[-1]): 
-        adj.append(attn[:, :, i])
+        #? if not converted from a tensor line 251 will throw a future warning error about it
+        adj.append(attn[:, :, i].numpy())
     
     adj = np.array(adj)
     pkl.dump([adj, loss_save], open(f'{opt.save_name}', 'wb'))
-
 
 if __name__ == '__main__':
 
@@ -288,3 +272,5 @@ if __name__ == '__main__':
 
     # train!
     train_model(opt)
+
+    print("Train complete... Yay!")
