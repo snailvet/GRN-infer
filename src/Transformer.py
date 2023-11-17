@@ -2,6 +2,8 @@
 # imports 
 
 import math
+import numpy as np
+import pandas as pd
 import torch 
 import torch.nn as nn
 import torch.nn.functional as F
@@ -13,7 +15,7 @@ def scaled_dot_product(Q, K, V):
     """
     Input:
         Q, K, V:    matrix vector products of the q, k, and v weight matrices 
-                    and a gene embedding g (In LaTeX: Q = W_q\vec{g})
+                    and a gene embedding g (eg. in LaTeX: Q = W_q\vec{g})
     """
 
     # Q, K, V should all be T x D_qkv matrices
@@ -82,7 +84,7 @@ class MultiheadAttention(nn.Module):
             return O
 
 ###############################################################################
-# Transformer module
+# Loss module
 
 class ATTNLoss(nn.Module):
 
@@ -103,9 +105,10 @@ class ATTNLoss(nn.Module):
     def approx_attn(self, attn):
 
         tK = attn.topk(self.top_k, -1) # get top_k value from each 'row'
-        aprx_attn = torch.zeros_like(attn)
+
         # replace top_k values back where they came from. All other elements zero 
-        aprx_attn.scatter_(1, tK.indices, tK.values) 
+        aprx_attn = torch.zeros_like(attn)
+        aprx_attn.scatter_(-1, tK.indices, tK.values) 
 
         return aprx_attn
 
@@ -118,22 +121,21 @@ class ATTNLoss(nn.Module):
 
 
 ###############################################################################
-# Transformer module
+# GRNInferModel module
 
-class Transformer(nn.Module):
+class GRNInferModel(nn.Module):
 
-    def __init__(self, input_dim, attn_dim, num_heads, ffn_embed_dim, alpha, top_k, dropout = 0.0):
+    def __init__(self, input_dim, attn_dim, num_heads, pre_ffn_embed_dim, post_ffn_embed_dim, alpha, top_k, dropout = 0.0):
         """
         Inputs:
-            input_dim:      Dimensionality of the input, will also be used for 
-                            the dimensionality of the output
-            attn_dim:       
-            num_heads:      Number of heads to use in the attention block
-            ffn_embed_dim:  Dimensionality of the hidden layer in the feed forward network
-            alpha:          regularisation weight hyper-parameter for loss function
-            top_k:          the number of largest attention weights to keep 
-                            when calculating the approximate attention matrix 
-            dropout:        Dropout probability to use in the dropout layers
+            input_dim:          Dimensionality of the input, will also be used for, the dimensionality of the output
+            attn_dim:           Dimensionality of the attention weight matrices
+            num_heads:          Number of heads to use in the attention block
+            pre_ffn_embed_dim:  Dimensionality of the hidden layers in the pre feed forward network
+            post_ffn_embed_dim: Dimensionality of the hidden layers in the post feed forward network
+            alpha:              regularisation weight hyper-parameter for loss function
+            top_k:              the number of largest attention weights to keep when calculating the approximate attention matrix 
+            dropout:            Dropout probability to use in the dropout layers
         """
         super().__init__()
 
@@ -141,7 +143,8 @@ class Transformer(nn.Module):
         self.input_dim = input_dim
         self.attn_dim = attn_dim
         self.num_heads = num_heads
-        self.ffn_embed_dim = ffn_embed_dim
+        self.pre_ffn_embed_dim = pre_ffn_embed_dim
+        self.post_ffn_embed_dim = post_ffn_embed_dim
         self.dropout = dropout
 
         # Attention layer
@@ -149,17 +152,17 @@ class Transformer(nn.Module):
 
         # Pre Attention Feed Forward Network
         self.pre_ff_network = nn.Sequential(
-            nn.Linear(input_dim, ffn_embed_dim),
+            nn.Linear(input_dim, pre_ffn_embed_dim),
             nn.Dropout(dropout), 
             nn.ReLU(inplace = True), 
-            nn.Linear(ffn_embed_dim, attn_dim)
+            nn.Linear(pre_ffn_embed_dim, attn_dim)
         )
         # Post Attention Feed Forward Network
         self.post_ff_network = nn.Sequential(
-            nn.Linear(attn_dim, ffn_embed_dim),
+            nn.Linear(attn_dim, post_ffn_embed_dim),
             nn.Dropout(dropout), 
             nn.ReLU(inplace = True), 
-            nn.Linear(ffn_embed_dim, input_dim)
+            nn.Linear(post_ffn_embed_dim, input_dim)
         )
 
         # additional layers
@@ -170,36 +173,45 @@ class Transformer(nn.Module):
         # Loss function
         self.loss = ATTNLoss(alpha, top_k)
 
-    def forward(self, x, mask = None):
+    def forward(self, x, return_attn = True):
 
         # reshape to Batch x numgenes(seqlen) x 1
-        x = x.unsqueeze(-1)
+        # x = x.unsqueeze(-1)
+        # raising an error
+        #? RuntimeError: mat1 and mat2 shapes cannot be multiplied (26272x1 and 383x64)
 
         x = self.pre_ff_network(x)
 
         # Attention part
-        attn_out, attn = self.self_attn(x, mask = mask, return_attention = True)
+        attn_out, attn = self.self_attn(x, return_attn)
+        
         x = x + self.dropout(attn_out)
         x = self.norm_1(x)
 
         # FFN part
         ffn_out = self.post_ff_network(x)
-        x = x + self.dropout(ffn_out) 
+        
+        #? Getting the following error because x dimension doesn't match the output of the post ffn 
+        # RuntimeError: The size of tensor a (64) must match the size of tensor b (821) at non-singleton dimension 2
+        # x = x + self.dropout(ffn_out) 
+        # temporarily setting x to ffn out
+        x = ffn_out
+
         x = self.norm_2(x)
         
-        x = x.squeeze(-1)
-
+        x = x.squeeze(-1) # not doing anything if we switch off unsqueeze
+        
         return x, attn
         
 ###############################################################################
 # Masker
 
-class TranscriptionFactorMasker():
+class GeneMasker():
 
     def __init__(self, genes, t_factors):
         """
         Inputs:
-            genes:      a 1D array of all gene names
+            genes:      a 1D array of all gene names 
             t_factors:  a 1D array of all transcription factor names
         """
 
@@ -207,19 +219,51 @@ class TranscriptionFactorMasker():
         self.t_factors = t_factors
 
         # get indexes of transcription factors in genes
-        self.tf_indexes = nn.nonzero(
-            genes[:, None] == t_factors
-        )[0]
+        bools = np.isin(genes, t_factors)
+        self.tf_indexes = np.array(np.where(bools))
+        self.non_tf_indexes = np.array(np.where(bools == False))
         
-    def build_mask(self, X):
+    def mask_tfs(self, X):
+        X[:, :, self.tf_indexes] = 0
 
-        mask = nn.zeros_like(X)
-        mask[:, self.tf_indexes] = 1
+    def mask_non_tfs(self, X):
 
-        return mask
+        X[:, :, self.non_tf_indexes] = 0
+    
+###############################################################################
+# data manipulation functions 
+
+def retrieve_tf_names(gene_names, tf_file, d_grade = None, nr_score = None):
+    """
+    Inputs:
+        gene_names: the gene names from the scRNA-seq data
+        tf_data:    the known transcription factor data
+        d_grade:    the minimum allowable Dorothea letter grade (eg. "B" will select transcription factors with Dorothea grades of "A" and "B")
+        nr_score:   the minimum allowable Number Report score (eg. "3" will allow any transcription factor with a number report of at least 3)
+    """
+
+    # load tf_data
+    tf_data = pd.read_csv(tf_file)
+
+    # find transcription factors that we have in our gene_names
+    tf_data = tf_data[tf_data["GeneName"].isin(gene_names)] 
+    
+    # filter out tfs that have a lower d_grade (only if a value is provided)
+    if d_grade:
+        tf_data = tf_data[tf_data.Dorothea <= d_grade.upper()]
+
+    # filter out tfs that have a lower nr_score (only if a value is provided)
+    if nr_score:
+        tf_data = tf_data[tf_data.Number_Report >= int(nr_score)]
+
+    if tf_data.shape[0] == 0:
+        raise ValueError("No qualifying transcription factors found in scRNA-seq data. Try adjusting minimum Dorothea grade and Number Report score") 
+
+    return tf_data.GeneName
+
 
 ###############################################################################
-# Model
+# 
 
 if __name__ == "__main__":
 
