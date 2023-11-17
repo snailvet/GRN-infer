@@ -1,27 +1,36 @@
-import argparse
-import pickle as pkl
+# imports
 
+import argparse
 import numpy as np
 import pandas as pd
+import pickle as pkl
+
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import average_precision_score, roc_auc_score
 
+###############################################################################
+# Parse command line arguments
+
 parser = argparse.ArgumentParser()
-parser.add_argument("--split_file", type=str, default='non')
-parser.add_argument("--train_y_file", type=str, default='non')
-parser.add_argument("--data_dir", type=str, default='non')
-parser.add_argument("--pre_GRN_file", type=str, default='split')
-parser.add_argument("--output_file", type=str, default='output.pkl')
+parser.add_argument("--split_file", type = str, default = 'non')
+parser.add_argument("--train_y_file", type = str, default = 'non')
+parser.add_argument("--data_dir", type = str, default = 'non')
+parser.add_argument("--pre_GRN_file", type = str, default = 'split')
+parser.add_argument("--output_file", type = str, default = 'output.pkl')
 opt = parser.parse_args()
-tmp_res = []
+
+###############################################################################
+# 
+
+tmp_res = [] # unclear what the purpose of this is, not referenced anywhere
 
 out = pkl.load(open(opt.pre_GRN_file, 'rb'))
 pred = np.array(out[0])
-tmp = pd.read_csv(opt.data_dir + '/data.csv', index_col=0).index
+tmp = pd.read_csv(opt.data_dir + '/data.csv', index_col = 0).index
 idn_idf = {item: i for i, item in enumerate(tmp)}
-a1 = pred.sum(-1, keepdims=True)
-a2 = pred.sum(-2, keepdims=True)
-a12 = pred.sum((-1, -2), keepdims=True)
+a1 = pred.sum(-1, keepdims = True)
+a2 = pred.sum(-2, keepdims = True)
+a12 = pred.sum((-1, -2), keepdims = True)
 avg = a1 * a2
 avg = avg / a12
 normalized = pred - avg
@@ -48,13 +57,13 @@ train_ys = np.array(train_ys)
 train_ys = np.array(train_ys)
 train_pred = []
 for i in range(10):
-    f = RandomForestClassifier(random_state=i)
+    f = RandomForestClassifier(random_state = i)
     f.fit(train_xs, train_ys)
     pred_out = f.predict_proba(test_xs)[:, 1]
     score = roc_auc_score(test_ys, pred_out)  # ,roc_auc_score(train_ys,f.predict_proba(train_xs)[:,1])
     score2 = average_precision_score(test_ys, pred_out) / np.mean(test_ys)
     n = sum(test_ys)
-    score3 = pd.DataFrame([pred_out, test_ys]).T.sample(frac=1).sort_values(0, ascending=False).iloc[:n][1].sum() / (
+    score3 = pd.DataFrame([pred_out, test_ys]).T.sample(frac = 1).sort_values(0, ascending = False).iloc[:n][1].sum() / (
             n ** 2 / len(test_ys))
     score4 = roc_auc_score(train_ys, f.predict_proba(train_xs)[:, 1])
     train_pred.append(f.predict_proba(train_xs)[:, 1])
@@ -76,13 +85,13 @@ del_neg = neg[list(set(low_confidence_neg) | set(low_consistency_neg))]
 nondelete = list(set(range(len(train_ys)))-set(del_pos) - set(del_neg))
 train_xs= train_xs[nondelete]
 train_ys= train_ys[nondelete]
-f = RandomForestClassifier(random_state=0)
+f = RandomForestClassifier(random_state = 0)
 f.fit(train_xs, train_ys)
 pred_out = f.predict_proba(test_xs)[:, 1]
 test_auc= roc_auc_score(test_ys, pred_out)  # ,roc_auc_score(train_ys,f.predict_proba(train_xs)[:,1])
 test_auprc_ratio = average_precision_score(test_ys, pred_out) / np.mean(test_ys)
 n = sum(test_ys)
-test_epr = pd.DataFrame([pred_out, test_ys]).T.sample(frac=1).sort_values(0, ascending=False).iloc[:n][1].sum() / (
+test_epr = pd.DataFrame([pred_out, test_ys]).T.sample(frac = 1).sort_values(0, ascending = False).iloc[:n][1].sum() / (
         n ** 2 / len(test_ys))
 train_auc = roc_auc_score(train_ys, f.predict_proba(train_xs)[:, 1])
 
