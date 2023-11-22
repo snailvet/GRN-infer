@@ -4,9 +4,11 @@
 import math
 import numpy as np
 import pandas as pd
+import pdb
 import torch 
 import torch.nn as nn
 import torch.nn.functional as F
+
 
 ###############################################################################
 # Scaled dot product
@@ -97,8 +99,8 @@ class ATTNLoss(nn.Module):
         """
         super().__init__()
 
-        self.alpha = alpha #? Default value for alpha?
-        self.top_k = top_k #? Default value for top_k?
+        self.alpha = alpha 
+        self.top_k = top_k 
 
         self.mse_loss = nn.MSELoss()
 
@@ -175,11 +177,12 @@ class GRNInferModel(nn.Module):
 
     def forward(self, x, return_attn = True):
 
-        # reshape to Batch x numgenes(seqlen) x 1
-        # x = x.unsqueeze(-1)
-        # raising an error
-        #? RuntimeError: mat1 and mat2 shapes cannot be multiplied (26272x1 and 383x64)
+        # # reshape to Batch x numgenes(seqlen) x 1
+        # if self.input_dim == 1:
+        #     # the embedding for each gene is of dimension 1
+        #     x = x.unsqueeze(-1)
 
+        # pre FFN part
         x = self.pre_ff_network(x)
 
         # Attention part
@@ -188,18 +191,15 @@ class GRNInferModel(nn.Module):
         x = x + self.dropout(attn_out)
         x = self.norm_1(x)
 
-        # FFN part
+        # post FFN part
         ffn_out = self.post_ff_network(x)
-        
-        #? Getting the following error because x dimension doesn't match the output of the post ffn 
-        # RuntimeError: The size of tensor a (64) must match the size of tensor b (821) at non-singleton dimension 2
-        # x = x + self.dropout(ffn_out) 
-        # temporarily setting x to ffn out
         x = ffn_out
-
+        # x = x + self.dropout(ffn_out) 
+        #? still creates an error x will have the attn_dim size
         x = self.norm_2(x)
-        
-        x = x.squeeze(-1) # not doing anything if we switch off unsqueeze
+
+        # if self.input_dim == 1:
+        #     x = x.squeeze(-1) 
         
         return x, attn
         
@@ -223,12 +223,23 @@ class GeneMasker():
         self.tf_indexes = np.array(np.where(bools))
         self.non_tf_indexes = np.array(np.where(bools == False))
         
-    def mask_tfs(self, X):
-        X[:, :, self.tf_indexes] = 0
+    def mask_tfs(self, X, inplace = True):
+        if not inplace:
+            X = X.clone()
 
-    def mask_non_tfs(self, X):
+        X[:, self.tf_indexes, :] = 0
 
-        X[:, :, self.non_tf_indexes] = 0
+        if not inplace:
+            return X
+
+    def mask_non_tfs(self, X, inplace = True):
+        if not inplace:
+            X = X.clone()
+
+        X[:, self.non_tf_indexes, :] = 0
+
+        if not inplace:
+            return X
     
 ###############################################################################
 # data manipulation functions 

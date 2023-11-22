@@ -4,6 +4,7 @@ import argparse
 import numpy as np
 import os
 import pandas as pd
+import pdb
 import pickle as pkl
 import random
 import torch
@@ -33,7 +34,7 @@ parser.add_argument("--PIDC_file", type = str, default = '')
 parser.add_argument("--save_name", type = str, default = './pretrain_output/')
 parser.add_argument("--seed", type = int, default = 0)
 parser.add_argument('--tf_data_file', type = str, help = 'path of transcription factor csv file.')
-parser.add_argument("--top_k", type = int, default = 20, help = "The number of largest attention weights to retain when calculating loss") #? need a defalt value
+parser.add_argument("--top_k", type = int, default = 20, help = "The number of largest attention weights to retain when calculating loss") 
 opt = parser.parse_args()
 
 ###############################################################################
@@ -129,9 +130,20 @@ def train_model(opt):
     #########################################
     ### setup the Model ###
     #########################################
+
+
+    # catch if we have an embedding of dimension 1
+    # we want a shape of [# cells, # genes, embedding dim]
+    if input_all.dim() == 2:
+        # the embedding for each gene is 1
+        input_all = input_all.unsqueeze(-1)
+        model_input_dim = 1
+    else:
+        model_input_dim = input_all.shape[-1]
     
+    # set up model
     model = GRNInferModel(
-        input_dim = input_all.shape[1], 
+        input_dim = model_input_dim, 
         attn_dim = opt.attention_dim,
         num_heads = opt.attention_heads, 
         pre_ffn_embed_dim = opt.ffn_embed_dim,
@@ -141,17 +153,13 @@ def train_model(opt):
         dropout = opt.dropout, 
     ).to(device)
     
-    #########################################
-    ### setup masking object              ###
-    #########################################
-
+    #setup masking object              
     g_masker = GeneMasker(
         genes = gene_name,
         t_factors = tf_names
     )
 
-    #########################################
-    
+    # setup optimiser
     optimizer = torch.optim.AdamW(
         model.parameters(), 
         lr = opt.lr, 
@@ -159,80 +167,69 @@ def train_model(opt):
         weight_decay = 0.01
     )
     
+    #setup data loader
     dataset = TensorDataset(
         input_all, 
         d_mask, 
         torch.LongTensor(list(range(len(input_all))))
     )
     
+    drop_last = True
     if len(input_all) < opt.batchsize:
-        dataloader = DataLoader(
-            dataset, 
-            batch_size = opt.batchsize, 
-            shuffle = True, 
-            num_workers = 1, 
-            drop_last = False
-        )
-    
-    else:
-        dataloader = DataLoader(
-            dataset, 
-            batch_size = opt.batchsize, 
-            shuffle = True, 
-            num_workers = 1, 
-            drop_last = True
-        )
+        drop_last = False
 
+    dataloader = DataLoader(
+        dataset, 
+        batch_size = opt.batchsize, 
+        shuffle = True, 
+        num_workers = 1, 
+        drop_last = drop_last
+    )
+    
     # Train
     model.train()
 
     loss_save = []
-    for epoch in tqdm(range(opt.n_epochs)):
+    t = tqdm(range(opt.n_epochs))
+    for epoch in t: #tqdm(range(opt.n_epochs)):
         loss_all = []
         model = model.to(device)
 
-        for data, mask, idn in dataloader:
-            data = torch.stack([data] * 1)
+        for X, mask, idn in dataloader:
 
             optimizer.zero_grad()
-            data_output = data.clone()
-            data = data.to(device)
+            X_clone = X.clone()
+            X = X.to(device)
 
-            # mask non-transcription factor genes in input data
-            g_masker.mask_non_tfs(data)
+            # mask non-transcription factor genes in input X
+            g_masker.mask_non_tfs(X)
                                     
-            ############################
             # forward pass
+            output, attn = model(X, return_attn = True)
 
-            output, attn = model(data, return_attn = True)
-
-            ############################
-            # calculate loss          ##
-            ############################
-
-            # mask the transcription factors in the input to the model and it's output
+            # calculate loss          
+            # mask the transcription factors for the original input to the model and the models output
             g_masker.mask_tfs(output)
-            g_masker.mask_tfs(data_output)
+            g_masker.mask_tfs(X_clone)
 
             loss = model.loss(
                 output, 
-                data_output.to(device), 
+                X_clone.to(device), 
                 attn 
             )
 
-            ############################
-
+            # backward step
             loss.backward()
             torch.nn.utils.clip_grad_value_(model.parameters(), 0.001)
             optimizer.step()
+
+            # record loss
             loss_all.append(loss)
 
-        print(
-            'finish training epoch:', 
-            epoch, 
-            'loss:', 
-            torch.stack(loss_all).mean()
-        )
+        # update tqdm ticker
+        t.set_description(f'Finished training epoch: {epoch}; loss: {torch.stack(loss_all).mean()}')
+
+        # 
         loss_save.append(torch.stack(loss_all).mean().cpu().item())
     
     print('Begin generate candidates GRN features')
@@ -246,8 +243,7 @@ def train_model(opt):
     
     adj = []
     for i in range(attn.shape[-1]): 
-        #? if not converted from a tensor line 251 will throw a future warning error about it
-        adj.append(attn[:, :, i].numpy())
+        adj.append(attn[:, :, i].cup().numpy())
     
     adj = np.array(adj)
     pkl.dump([adj, loss_save], open(f'{opt.save_name}', 'wb'))
