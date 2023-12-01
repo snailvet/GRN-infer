@@ -12,11 +12,22 @@ import torch.nn.functional as F
 ###############################################################################
 # Scaled dot product
 
-def scaled_dot_product(Q, K, V):
+def keep_top_k(A, top_k):
+
+    tK = A.topk(top_k, -1) # get top_k value from each 'row'
+
+    # replace top_k values back where they came from. All other elements zero 
+    tkA = torch.zeros_like(A)
+    tkA.scatter_(-1, tK.indices, tK.values) 
+
+    return tkA
+
+def scaled_dot_product(Q, K, V, top_k):
     """
     Input:
         Q, K, V:    matrix vector products of the q, k, and v weight matrices 
                     and a gene embedding g (eg. in LaTeX: Q = W_q\vec{g})
+        top_k:              the number of largest attention weights to keep 
     """
 
     # Q, K, V should all be T x D_qkv matrices
@@ -28,9 +39,10 @@ def scaled_dot_product(Q, K, V):
 
     # a_{ij}
     A = F.softmax(S, dim = -1)
+    tkA = keep_top_k(A, top_k)
 
     # h_{ij}
-    H = torch.matmul(A, V)
+    H = torch.matmul(tkA, V)
 
     return H, A
 
@@ -39,12 +51,13 @@ def scaled_dot_product(Q, K, V):
 
 class MultiheadAttention(nn.Module):
 
-    def __init__(self, input_dim, embed_dim, num_heads):
+    def __init__(self, input_dim, embed_dim, num_heads, top_k):
         """
         Inputs:
             input_dim:  Dimensionality of the input
             embed_dim:  Dimensionality of the embedding that is output
             num_heads:  Number of heads to use in the attention block
+            top_k:      the number of largest attention weights to keep  
         """
 
         super().__init__()
@@ -54,6 +67,7 @@ class MultiheadAttention(nn.Module):
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.head_dim = embed_dim // num_heads
+        self.top_k = top_k
 
         # Stack all weight matrices 1...h together for efficiency
         self.QKV_proj = nn.Linear(input_dim, 3 * embed_dim)
@@ -73,7 +87,7 @@ class MultiheadAttention(nn.Module):
         Q, K, V = QKV.chunk(3, dim = -1)
 
         # Determine value outputs
-        values, attention = scaled_dot_product(Q, K, V)
+        values, attention = scaled_dot_product(Q, K, V, self.top_k)
         #? should re rehsape and permute the attention?
         values = values.permute(0, 2, 1, 3) # [Batch, SeqLen, Head, Dims]
         values = values.reshape(batch_size, seq_length, self.embed_dim)
@@ -150,7 +164,7 @@ class GRNInferModel(nn.Module):
         self.dropout = dropout
 
         # Attention layer
-        self.self_attn = MultiheadAttention(attn_dim, attn_dim, num_heads)
+        self.self_attn = MultiheadAttention(attn_dim, attn_dim, num_heads, top_k)
 
         # Pre Attention Feed Forward Network
         self.pre_ff_network = nn.Sequential(
