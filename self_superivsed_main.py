@@ -147,7 +147,7 @@ def train_model(opt):
     
     adj = []
     for i in range(attn.shape[-1]): 
-        adj.append(attn[:, :, i].cup().numpy())
+        adj.append(attn[:, :, i].cpu().numpy())
     
     adj = np.array(adj)
     pkl.dump([adj, loss_save], open(f'{opt.save_name}', 'wb'))
