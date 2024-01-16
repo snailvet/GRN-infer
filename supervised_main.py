@@ -3,6 +3,7 @@
 import argparse
 import numpy as np
 import pandas as pd
+import pdb
 import pickle as pkl
 
 from sklearn.ensemble import RandomForestClassifier
@@ -25,6 +26,7 @@ opt = parser.parse_args()
 tmp_res = [] # unclear what the purpose of this is, not referenced anywhere
 
 out = pkl.load(open(opt.pre_GRN_file, 'rb'))
+# pdb.set_trace()
 pred = np.array(out[0])
 tmp = pd.read_csv(opt.data_dir + '/data.csv', index_col = 0).index
 idn_idf = {item: i for i, item in enumerate(tmp)}
@@ -47,10 +49,12 @@ for item in train:
     zitem = z[item]
     train_xs.append(pred[:, idn_idf[zitem[0]], idn_idf[zitem[1]]])
     train_ys.append(trainy[item])
+
 for item in test:
     zitem = z[item]
     test_xs.append(pred[:, idn_idf[zitem[0]], idn_idf[zitem[1]]])
     test_ys.append(y[item])
+    
 train_xs = np.array(train_xs)
 test_xs = np.array(test_xs)
 train_ys = np.array(train_ys)
@@ -95,5 +99,6 @@ test_epr = pd.DataFrame([pred_out, test_ys]).T.sample(frac = 1).sort_values(0, a
         n ** 2 / len(test_ys))
 train_auc = roc_auc_score(train_ys, f.predict_proba(train_xs)[:, 1])
 
+# output result
 result = [opt.data_dir, test_auc, test_auprc_ratio, test_epr, train_auc]
 pkl.dump(result, open(opt.output_file, 'wb'))

@@ -10,80 +10,83 @@ import torch.nn.functional as F
 
 
 ###############################################################################
-# Scaled dot product
-
-def scaled_dot_product(Q, K, V):
-    """
-    Input:
-        Q, K, V:    matrix vector products of the q, k, and v weight matrices 
-                    and a gene embedding g (eg. in LaTeX: Q = W_q\vec{g})
-    """
-
-    # Q, K, V should all be T x D_qkv matrices
-    d_kqy = Q.size()[-1]
-
-    # s_{ij}
-    S = torch.matmul(Q, K.transpose(-2, -1))
-    S = S / math.sqrt(d_kqy)
-
-    # a_{ij}
-    A = F.softmax(S, dim = -1)
-
-    # h_{ij}
-    H = torch.matmul(A, V)
-
-    return H, A
-
-###############################################################################
 # Mutlihead Attention module
 
 class MultiheadAttention(nn.Module):
 
-    def __init__(self, input_dim, embed_dim, num_heads):
+    def __init__(self, input_dim, embed_dim, num_heads, top_k):
         """
         Inputs:
             input_dim:  Dimensionality of the input
             embed_dim:  Dimensionality of the embedding that is output
             num_heads:  Number of heads to use in the attention block
+            top_k:      the number of largest attention weights to keep  
         """
 
         super().__init__()
 
+        #? Why is this needed?
         assert embed_dim % num_heads == 0, "Embedding dimension must be 0 modulo number of heads"
 
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.head_dim = embed_dim // num_heads
+        self.top_k = top_k
 
         # Stack all weight matrices 1...h together for efficiency
-        self.QKV_proj = nn.Linear(input_dim, 3 * embed_dim)
-        self.O_proj = nn.Linear(embed_dim, embed_dim)
+        self.QKV_proj = nn.Linear(input_dim, 3 * embed_dim, bias = False)
+        self.O_proj = nn.Linear(embed_dim, embed_dim, bias = False)
 
     def forward(self, x, return_attention = False):
 
-        batch_size, seq_length, _ = x.size()
+        batch_size, n_genes, _ = x.size()
 
         QKV = self.QKV_proj(x)
 
         # Separate Q, K, V from linear input
         QKV = QKV.reshape(
-            batch_size, seq_length, self.num_heads, 3 * self.head_dim
+            batch_size, n_genes, self.num_heads, 3 * self.head_dim
         )
-        QKV = QKV.permute(0, 2, 1, 3) # [Batch, Head, SeqLen, Dims]
+        QKV = QKV.permute(0, 2, 1, 3) # [Batch, Head, NGenes, Dims]
         Q, K, V = QKV.chunk(3, dim = -1)
 
         # Determine value outputs
-        values, attention = scaled_dot_product(Q, K, V)
-        #? should re rehsape and permute the attention?
-        values = values.permute(0, 2, 1, 3) # [Batch, SeqLen, Head, Dims]
-        values = values.reshape(batch_size, seq_length, self.embed_dim)
+        values, attn = self.scaled_dot_product(Q, K, V)
+        values = values.permute(0, 2, 1, 3) # [Batch, NGenes, Head, Dims]
+        values = values.reshape(batch_size, n_genes, self.embed_dim)
 
         O = self.O_proj(values)
 
         if return_attention:
-            return O, attention
+            return O, attn
         else:
             return O
+
+    def scaled_dot_product(self, Q, K, V):
+        """
+        Input:
+            Q, K, V:    matrix vector products of the q, k, and v weight matrices 
+                        and a gene embedding g (eg. in LaTeX: Q = W_q\vec{g})
+        """
+
+        # Q, K, V should all be T x D_qkv matrices
+        d_kqy = Q.size()[-1]
+
+        # s_{ij}
+        S = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(d_kqy)
+
+        # a_{ij}
+        A = F.softmax(S, dim = -1)
+
+        # retain top_k values of A
+        tK = A.topk(self.top_k, -1)
+        tkA = torch.zeros_like(A).scatter_(-1, tK.indices, tK.values)
+
+        # h_{ij}
+        H = torch.matmul(tkA, V)
+
+        return H, A
+
 
 ###############################################################################
 # Loss module
@@ -102,7 +105,8 @@ class ATTNLoss(nn.Module):
         self.alpha = alpha 
         self.top_k = top_k 
 
-        self.mse_loss = nn.MSELoss()
+        self.gene_mse_loss = nn.MSELoss()
+        self.attn_mse_loss = nn.MSELoss()
 
     def approx_attn(self, attn):
 
@@ -116,8 +120,8 @@ class ATTNLoss(nn.Module):
 
     def forward(self, x, y, attn):
 
-        rec_loss = self.mse_loss(x, y)
-        attn_loss = self.mse_loss(attn, self.approx_attn(attn))
+        rec_loss = self.gene_mse_loss(x, y)
+        attn_loss = self.attn_mse_loss(attn, self.approx_attn(attn))
 
         return rec_loss + self.alpha * attn_loss
 
@@ -150,7 +154,7 @@ class GRNInferModel(nn.Module):
         self.dropout = dropout
 
         # Attention layer
-        self.self_attn = MultiheadAttention(attn_dim, attn_dim, num_heads)
+        self.self_attn = MultiheadAttention(attn_dim, attn_dim, num_heads, top_k)
 
         # Pre Attention Feed Forward Network
         self.pre_ff_network = nn.Sequential(
